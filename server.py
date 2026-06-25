@@ -204,6 +204,7 @@ def get_gpu(index):
         "memory": {
             "used_mi": gpu.get("memory_used_mi"),
             "formatted_used": _fmt(gpu.get("memory_used_mi"), "MiB"),
+            "formatted_used_%": _fmt(gpu.get("memory_used_mi") / gpu.get("memory_total_mi") * 100 if gpu.get("memory_total_mi") else None, "%"),
             "total_mi": gpu.get("memory_total_mi"),
             "formatted_total": _fmt(gpu.get("memory_total_mi"), "MiB"),
             "used_gb": round(gpu.get("memory_used_mi", 0) / 1024, 2) if gpu.get("memory_used_mi") is not None else None,
