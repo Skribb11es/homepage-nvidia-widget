@@ -7,6 +7,14 @@ app = Flask(__name__)
 
 API_TOKEN = os.environ.get("NVIDIA_SMI_TOKEN", "").strip()
 
+
+def _fmt(value, unit, decimals=1):
+    """Format a numeric value with a unit string."""
+    if value is None:
+        return None
+    return f"{round(value, decimals)} {unit}"
+
+
 def run_cmd(cmd):
     try:
         return subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True).strip()
@@ -18,22 +26,17 @@ def _parse_gpu_block(block: str):
     lines = [l for l in block.splitlines() if l.strip()]
     if not lines:
         return None
-
-    # Extract GPU index
+    
     idx_match = re.match(r'^\s*(\d+)', lines[0] or "")
     if not idx_match:
         return None
     gpu_index = int(idx_match.group(1))
 
-    # Extract GPU name from the GPU info line
-    # Pattern: "  0  Tesla P100-PCIE-16GB           Off | ..."
     name_match = re.search(r'\|\s*\d+\s+(?:MIG\s+)?(?P<name>.+?)\s+Off\s*\|', lines[0] or "")
     if not name_match:
         return None
     gpu_name = name_match.group("name").strip()
 
-    # Parse the metrics line:
-    # " N/A   45C    P0             32W /  250W |   15987MiB /  16384MiB |      0%      Default |"
     m = re.search(
         r'(N/A|\d+\.?\d*)\s+'           # Fan (N/A or numeric)
         r'(N/A|(\d+\.?\d*)C)\s+'         # Temp
@@ -47,15 +50,27 @@ def _parse_gpu_block(block: str):
     )
     if m:
         temp = float(m.group(3)) if m.group(2) != 'N/A' else None
+        gpu_util = float(m.group(10))
+        mem_util = None  # utilization.memory not in this regex
         return {
             "index": gpu_index,
             "name": gpu_name,
-            "temperature": temp,
+            "temperature": {
+                "value": temp,
+                "formatted": _fmt(temp, "°C"),
+            },
             "power_usage_watts": float(m.group(5)),
             "power_cap_watts": float(m.group(6)),
             "memory_used_mi": float(m.group(7)),
             "memory_total_mi": float(m.group(8)),
-            "gpu_utilization": float(m.group(10)),
+            "gpu_utilization": {
+                "value": gpu_util,
+                "formatted": _fmt(gpu_util, "%"),
+            },
+            "memory_utilization": {
+                "value": mem_util,
+                "formatted": _fmt(mem_util, "%"),
+            },
         }
 
     return None
@@ -63,7 +78,7 @@ def _parse_gpu_block(block: str):
 
 def parse_gpu_info(raw: str):
     gpus = []
-    # Split on the separator lines like "+-------------------------+------------------------+----------------------+"
+
     blocks = re.split(r'^\+-[\+\-]+-+$', raw, flags=re.MULTILINE)
 
     for block in blocks:
@@ -75,7 +90,6 @@ def parse_gpu_info(raw: str):
 
 
 def get_gpus():
-    # First try the CSV format query for reliable parsing
     raw = run_cmd(["nvidia-smi",
         "--query-gpu=name,temperature.gpu,power.draw,power.limit,"
         "memory.used,memory.total,utilization.gpu,utilization.memory",
@@ -91,23 +105,34 @@ def get_gpus():
             if len(parts) < 8:
                 continue
             try:
+                temp_raw = float(parts[1]) if parts[1] != 'N/A' else None
+                gpu_util_raw = float(parts[6]) if parts[6] != 'N/A' else None
+                mem_util_raw = float(parts[7]) if parts[7] != 'N/A' else None
                 gpus.append({
                     "index": len(gpus),
                     "name": parts[0] if parts[0] != 'N/A' else None,
-                    "temperature": float(parts[1]) if parts[1] != 'N/A' else None,
+                    "temperature": {
+                        "value": temp_raw,
+                        "formatted": _fmt(temp_raw, "°C"),
+                    },
                     "power_usage_watts": float(parts[2]) if parts[2] != 'N/A' else None,
                     "power_cap_watts": float(parts[3]) if parts[3] != 'N/A' else None,
                     "memory_used_mi": float(parts[4]) if parts[4] != 'N/A' else None,
                     "memory_total_mi": float(parts[5]) if parts[5] != 'N/A' else None,
-                    "gpu_utilization": float(parts[6]) if parts[6] != 'N/A' else None,
-                    "memory_utilization": float(parts[7]) if parts[7] != 'N/A' else None,
+                    "gpu_utilization": {
+                        "value": gpu_util_raw,
+                        "formatted": _fmt(gpu_util_raw, "%"),
+                    },
+                    "memory_utilization": {
+                        "value": mem_util_raw,
+                        "formatted": _fmt(mem_util_raw, "%"),
+                    },
                 })
             except (ValueError, IndexError):
                 continue
         if gpus:
             return gpus
 
-    # Fallback: parse full nvidia-smi text table
     raw_full = run_cmd(["nvidia-smi"])
     return parse_gpu_info(raw_full) if raw_full else []
 
@@ -152,26 +177,36 @@ def get_gpu(index):
         abort(404, description=f"GPU with index {index} not found. Available GPUs: {list(range(len(gpus)))}")
 
     gpu = gpus[index]
+    temp_data = gpu.get("temperature", {})
+    gpu_util_data = gpu.get("gpu_utilization", {})
+    mem_util_data = gpu.get("memory_utilization", {})
     return jsonify({
         "index": gpu["index"],
         "name": gpu["name"],
         "temperature": {
-            "value": gpu.get("temperature"),
-            "unit": "C",
+            "value": temp_data.get("value") if isinstance(temp_data, dict) else temp_data,
+            "formatted": temp_data.get("formatted") if isinstance(temp_data, dict) else None,
+            "unit": "°C",
         },
         "power": {
             "usage_watts": gpu.get("power_usage_watts"),
+            "formatted_usage": _fmt(gpu.get("power_usage_watts"), "W"),
             "cap_watts": gpu.get("power_cap_watts"),
+            "formatted_cap": _fmt(gpu.get("power_cap_watts"), "W"),
             "unit": "W",
         },
         "utilization": {
-            "gpu_percent": gpu.get("gpu_utilization"),
-            "memory_percent": gpu.get("memory_utilization"),
+            "gpu_percent": gpu_util_data.get("value") if isinstance(gpu_util_data, dict) else gpu_util_data,
+            "gpu_formatted": gpu_util_data.get("formatted") if isinstance(gpu_util_data, dict) else None,
+            "memory_percent": mem_util_data.get("value") if isinstance(mem_util_data, dict) else mem_util_data,
+            "memory_formatted": mem_util_data.get("formatted") if isinstance(mem_util_data, dict) else None,
             "unit": "%",
         },
         "memory": {
             "used_mi": gpu.get("memory_used_mi"),
+            "formatted_used": _fmt(gpu.get("memory_used_mi"), "MiB"),
             "total_mi": gpu.get("memory_total_mi"),
+            "formatted_total": _fmt(gpu.get("memory_total_mi"), "MiB"),
             "used_gb": round(gpu.get("memory_used_mi", 0) / 1024, 2) if gpu.get("memory_used_mi") is not None else None,
             "total_gb": round(gpu.get("memory_total_mi", 0) / 1024, 2) if gpu.get("memory_total_mi") is not None else None,
             "unit": "MiB",
