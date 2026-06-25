@@ -9,7 +9,6 @@ API_TOKEN = os.environ.get("NVIDIA_SMI_TOKEN", "").strip()
 
 
 def _fmt(value, unit, decimals=1):
-    """Format a numeric value with a unit string."""
     if value is None:
         return None
     return f"{round(value, decimals)} {unit}"
@@ -51,7 +50,7 @@ def _parse_gpu_block(block: str):
     if m:
         temp = float(m.group(3)) if m.group(2) != 'N/A' else None
         gpu_util = float(m.group(10))
-        mem_util = None  # utilization.memory not in this regex
+        mem_util = None
         return {
             "index": gpu_index,
             "name": gpu_name,
